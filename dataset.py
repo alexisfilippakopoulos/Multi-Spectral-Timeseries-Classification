@@ -198,7 +198,7 @@ def create_train_loader(ds, batch_size, num_workers):
     )
 
 
-def create_evaluation_loaders(dataset_name, splits, config, sample_pixels_val=False):
+def create_evaluation_loaders(dataset_name, splits, data_root, classes, num_pixels, batch_size, sample_pixels_val=False):
     """
     Create data loaders for unsupervised domain adaptation
     """
@@ -207,24 +207,24 @@ def create_evaluation_loaders(dataset_name, splits, config, sample_pixels_val=Fa
     # Validation dataset
     val_transform = transforms.Compose(
         [
-            RandomSamplePixels(config.num_pixels) if sample_pixels_val else Identity(),
+            RandomSamplePixels(num_pixels) if sample_pixels_val else Identity(),
             RandomSampleTimeSteps(config.seq_length) if is_tsnet else Identity(),
             Normalize(),
             ToTensor(),
         ]
     )
     val_dataset = PixelSetData(
-        config.data_root,
+        data_root,
         dataset_name,
-        config.classes,
+        classes,
         val_transform,
         indices=splits[dataset_name]["val"],
     )
     val_loader = data.DataLoader(
         val_dataset,
-        num_workers=config.num_workers,
+        num_workers=2,
         batch_sampler=GroupByShapesBatchSampler(
-            val_dataset, config.batch_size, by_pixel_dim=not sample_pixels_val
+            val_dataset, batch_size, by_pixel_dim=not sample_pixels_val
         ),
     )
 
@@ -237,16 +237,16 @@ def create_evaluation_loaders(dataset_name, splits, config, sample_pixels_val=Fa
         ]
     )
     test_dataset = PixelSetData(
-        config.data_root,
+        data_root,
         dataset_name,
-        config.classes,
+        classes,
         test_transform,
         indices=splits[dataset_name]["test"],
     )
     test_loader = data.DataLoader(
         test_dataset,
-        num_workers=config.num_workers,
-        batch_sampler=GroupByShapesBatchSampler(test_dataset, config.batch_size),
+        num_workers=2,
+        batch_sampler=GroupByShapesBatchSampler(test_dataset, batch_size),
     )
 
     print(f"evaluation dataset:", dataset_name)
@@ -424,6 +424,7 @@ class InfiniteSliceIterator:
 
 
 if __name__ == "__main__":
+    print(os.getcwd())
     classes = label_utils.get_classes("france")
     dataset = PixelSetData("/media/data/mark_pixels", "france/31TCJ/2017", classes, with_extra=True)
     print(dataset[0])
