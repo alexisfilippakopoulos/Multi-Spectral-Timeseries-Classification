@@ -302,17 +302,12 @@ def get_dataloaders_for_cv(dataset, n_splits=5, sample_pixels=32, batch_size=8):
     for i in range(n_splits):
         val_idx = folds[i]
         train_idx = np.concatenate([folds[j] for j in range(n_splits) if j != i])
-        #dataset.transform = None
-        # compute per-band stats only on training data
-        #mean, std = compute_band_stats(dataset, train_idx)
-        #transform = NormalizePerBand(mean, std)
-        #dataset.transform = transform
 
         train_subset = WrappedPixelSubset(dataset, train_idx, sample_pixels=sample_pixels, is_validation=False)
         val_subset = WrappedPixelSubset(dataset, val_idx, sample_pixels=None, is_validation=True)
 
         train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
+        val_loader = DataLoader(val_subset, batch_size=1, shuffle=False)
 
         dataloaders.append((train_loader, val_loader))
 
