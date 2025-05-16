@@ -2,4 +2,12 @@ timematch_data/
 __pycache__/
 figures/init_distr.svg
 figures/filtered_distr.svg
+figures/accuracy.svg
+figures/macro_recall.svg
+figures/macro_pres.svg
+figures/macro_f1.svg
+figures/weighted_recall.svg
+figures/weighted_pres.svg
+figures/weighted_f1.svg
+figures/best_metrics_and_cms.svg
 best_models/

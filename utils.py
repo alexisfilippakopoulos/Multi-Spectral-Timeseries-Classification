@@ -6,9 +6,13 @@ import os
 import pickle as pkl
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.nn import CrossEntropyLoss
+from tqdm import tqdm
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 import yaml
 import zarr
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 def read_yaml_class_mapping(country):
@@ -313,73 +317,138 @@ def get_dataloaders_for_cv(dataset, n_splits=5, sample_pixels=32, batch_size=8):
 
     return dataloaders
 
+def normalize_batch(batch, mean, std):
+    pixels = batch["pixels"].float()
+    # broadcast to (1, C, 1)
+    mean = mean[None, :, None]
+    std = std[None, :, None]
+    batch["pixels"] = (pixels - mean) / (std + 1e-6)
+    batch["extra"] = batch["extra"].float()
+    return batch
 
-class FilteredPixelSetData(Dataset):
-    def __init__(self, root_dir, dataset_name, samples, class_to_idx, transform=None):
-        """
-        Args:
-            root_dir (str): Path to the root dataset directory
-            dataset_name (str): Folder structure like country/tile/year
-            samples (List[Tuple[str, int, int, Any]]): Each item is (zarr_path, parcel_idx, class_idx, extra_features)
-            class_to_idx (dict): Mapping from class name to index
-            transform (callable, optional): Optional transform to apply to each sample
-        """
-        super().__init__()
-        self.root_dir = root_dir
-        self.dataset_name = dataset_name
-        self.samples = samples
-        self.class_to_idx = class_to_idx
-        self.transform = transform
+def plot_metrics_shaded(per_phase_metric, y_label, title, save_path):
+    # of shape (num_folds, num_epochs)
+    metrics_array = np.array(per_phase_metric)  
+    mean_metric = np.mean(metrics_array, axis=0)
+    std_metric = np.std(metrics_array, axis=0)
 
-    def __len__(self):
-        return len(self.samples)
+    epochs = np.arange(1, len(mean_metric) + 1)
 
-    def __getitem__(self, index):
-        path, parcel_idx, y, extra = self.samples[index]
-        pixels = zarr.load(path)  # (T, C, S)
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, mean_metric, label=f'Mean {y_label}')
+    plt.fill_between(epochs, mean_metric - std_metric, mean_metric + std_metric, alpha=0.3, label='±1 Std Dev')
+    plt.xlabel('Epoch')
+    plt.ylabel(y_label)
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(save_path + ".png", dpi=300)
+    plt.savefig(save_path + ".svg", dpi=300)
+    plt.show()
 
-        sample = {
-            "index": index,
-            "parcel_index": parcel_idx,
-            "pixels": pixels,
-            "valid_pixels": np.ones((pixels.shape[0], pixels.shape[-1]), dtype=np.float32),
-            "positions": None,  # if needed, can be added externally
-            "extra": np.array(extra),
-            "label": y,
-        }
-
-        if self.transform:
-            sample = self.transform(sample)
-
-        return sample
-
-class SimplePixelDataset(Dataset):
-    def __init__(self, samples, transform=None):
-        """
-        Args:
-            samples (list): List of tuples: (zarr_path, parcel_idx, class_idx, geom_feats)
-            transform (callable, optional): Transform to apply on a sample
-        """
-        self.samples = samples
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        path, parcel_idx, class_idx, geom_feats = self.samples[idx]
+def train_one_epoch(model, optimizer, train_dl, per_channel_means, per_channel_stds, device):
+    criterion = CrossEntropyLoss()
+    curr_loss = 0.
+    model.to(device)
+    model.train()
+    for i, batch in enumerate(train_dl):
+        batch = normalize_batch(batch, per_channel_means, per_channel_stds)
+        batch["pixels"] = batch["pixels"].to(device)
+        batch["valid_pixels"] = batch["valid_pixels"].to(device)
+        batch["positions"] = batch["positions"].to(device)
+        batch["extra"] = batch["extra"].to(device)
+        batch["label"] = batch["label"].to(device)
         
-        pixels = zarr.load(path)
+        optimizer.zero_grad()
+        logits = model(pixels=batch["pixels"], mask=batch["valid_pixels"], positions=batch["positions"], extra=batch["extra"])
+        loss = criterion(logits, batch["label"])
+        loss.backward()
+        optimizer.step()
+        curr_loss += loss.item()
+    return curr_loss / len(train_dl)
 
-        sample = {
-            "pixels": pixels.astype(np.float32),       # (T, C, S)
-            "label": int(class_idx),                   # integer label
-            "geometric_features": np.array(geom_feats, dtype=np.float32),
-            "path": path,
-            "parcel_idx": parcel_idx
-        }
+def validate(model, val_dl, per_channel_means, per_channel_stds, device):
+    criterion = CrossEntropyLoss()
+    curr_loss, all_preds, all_labels = 0., [], []
+    model.to(device)
+    model.eval()
+    with torch.inference_mode():
+        for i, batch in enumerate(val_dl):
+            batch = normalize_batch(batch, per_channel_means, per_channel_stds)
+            batch["pixels"] = batch["pixels"].to(device)
+            batch["valid_pixels"] = batch["valid_pixels"].to(device)
+            batch["positions"] = batch["positions"].to(device)
+            batch["extra"] = batch["extra"].to(device)
+            batch["label"] = batch["label"].to(device)
 
-        if self.transform:
-            sample = self.transform(sample)
+            logits = model(pixels=batch["pixels"], mask=batch["valid_pixels"], positions=batch["positions"], extra=batch["extra"])
+            loss = criterion(logits, batch["label"])
+            curr_loss += loss.item()
+            preds = torch.argmax(logits, dim=1)
+            all_preds.append(preds.cpu())
+            all_labels.append(batch["label"].cpu())
+    all_labels = torch.cat(all_labels).numpy()
+    all_preds = torch.cat(all_preds).numpy()
+    return curr_loss / len(val_dl), all_labels, all_preds
 
-        return sample
+def calculate_val_metrics(all_preds, all_labels, conf_matrix=False):
+    accuracy = accuracy_score(all_labels, all_preds)
+    macro_pres = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    macro_rec = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+    macro_f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    weighted_pres = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
+    weighted_rec = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
+    weighted_f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    if conf_matrix:
+        cm = confusion_matrix(all_labels, all_preds)
+        return accuracy, macro_pres, macro_rec, macro_f1, weighted_pres, weighted_rec, weighted_f1, cm
+    else:
+        return accuracy, macro_pres, macro_rec, macro_f1, weighted_pres, weighted_rec, weighted_f1
+
+
+def plot_metrics_and_heatmaps(metrics_dict, heatmaps, heatmap_titles=None, title='Metrics & Confusion Matrices'):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    num_metrics = len(metrics_dict)
+    num_heatmaps = len(heatmaps)
+    total_plots = num_metrics + num_heatmaps
+
+    fig, axs = plt.subplots(nrows=4, ncols=3, figsize=(15, 18))
+    axs = axs.flatten()
+
+    fold_ids = [f"Fold {i+1}" for i in range(len(next(iter(metrics_dict.values()))))]
+
+    # plot bar charts for each metric
+    for i, (metric_name, scores) in enumerate(metrics_dict.items()):
+        ax = axs[i]
+        bars = ax.bar(fold_ids, scores, color='mediumseagreen', edgecolor='black')
+        ax.set_title(metric_name)
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel("Score")
+        ax.tick_params(axis='x', rotation=30)
+        ax.grid(True, axis='y')
+        ax.bar_label(bars, fmt="%.2f", padding=3)
+
+    # plot heatmaps for each fold
+    for j, cm in enumerate(heatmaps):
+        ax = axs[num_metrics + j]
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax, cbar=False, square=True)
+        if heatmap_titles:
+            ax.set_title(heatmap_titles[j])
+        else:
+            ax.set_title(f'Confusion Matrix Fold {j+1}')
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('True')
+
+    # Hide any unused subplots
+    for k in range(total_plots, len(axs)):
+        axs[k].axis('off')
+
+    fig.suptitle(title, fontsize=18)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    plt.savefig("best_metrics_and_cms.png", dpi=300)
+    plt.savefig("best_metrics_and_cms.svg", dpi=300)
+    plt.show()
+
+
