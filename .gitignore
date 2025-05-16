@@ -2,3 +2,4 @@ timematch_data/
 __pycache__/
 figures/init_distr.svg
 figures/filtered_distr.svg
+best_models/
