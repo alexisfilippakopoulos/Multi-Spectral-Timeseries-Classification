@@ -16,9 +16,29 @@ import seaborn as sns
 
 
 def read_yaml_class_mapping(country):
+    """
+    Reads the YAML file containing class mappings for a given country.
+
+    Parameters:
+        country (str): The name of the country whose class mapping is to be read.
+
+    Returns:
+        dict: A dictionary representing the class-to-code mapping.
+    """
     return yaml.load(open("denmark_class_mapping.yml"), Loader=yaml.FullLoader)
 
 def get_code_to_class(country, combine_spring_and_winter=False):
+    """
+    Generates a mapping from crop codes to class names for a given country.
+
+    Parameters:
+        country (str): The name of the country for which to generate the code-to-class mapping.
+        combine_spring_and_winter (bool): If True, combines spring and winter crop codes under a single class.
+                                          If False, separates them using 'spring_' and 'winter_' prefixes.
+
+    Returns:
+        dict: A dictionary mapping crop codes to class names.
+    """
     class_mapping = read_yaml_class_mapping(country)
 
     code_to_class = {}
@@ -40,6 +60,17 @@ def get_code_to_class(country, combine_spring_and_winter=False):
     return code_to_class
 
 def get_classes(*countries, method=set.union, combine_spring_and_winter=False):
+    """
+    Aggregates class names from one or more countries using a specified set operation.
+
+    Parameters:
+        *countries (str): One or more country names to include in the aggregation.
+        method (function): A set operation to combine class sets.
+        combine_spring_and_winter (bool): Whether to combine spring and winter crop codes as a single class.
+
+    Returns:
+        list: A sorted list of unique class names resulting from the aggregation.
+    """
     class_sets = []
     for country in countries:
         code_to_class = get_code_to_class(country, combine_spring_and_winter)
@@ -49,6 +80,15 @@ def get_classes(*countries, method=set.union, combine_spring_and_winter=False):
     return classes
 
 def get_codification_table(country):
+    """
+    Reads the codification table CSV for a given country and returns a crop code-to-name mapping.
+
+    Parameters:
+        country (str): The name of the country whose codification table is to be read.
+
+    Returns:
+        dict: A dictionary mapping crop codes to their names or groups.
+    """
     codification_table = os.path.join('class_mapping', f'{country}_codification_table.csv')
     with open(codification_table, newline='') as f:
         delimiter = ';' if country in ['denmark', 'austria'] else ','
@@ -57,6 +97,17 @@ def get_codification_table(country):
     return crop_codes
 
 def plot_distribution(label_names, counts, save_path):
+    """
+    Plots and saves a bar chart showing the distribution of class labels.
+
+    Parameters:
+        label_names (list of str): List of class names.
+        counts (list of int): Corresponding count of samples for each class.
+        save_path (str): Path to save the plot as PNG and SVG files.
+
+    Returns:
+        None
+    """
     plt.figure(figsize=(12, 6))
     bars = plt.bar(label_names, counts, color='skyblue', edgecolor='black')
 
@@ -76,6 +127,28 @@ def plot_distribution(label_names, counts, save_path):
     plt.show()
 
 class PixelSetData(Dataset):
+    """
+    A PyTorch Dataset for loading time-series pixel data from Sentinel-2 parcels,
+    along with associated metadata and class labels.
+
+    Each sample includes temporal pixel values, metadata, geometric features, and a class label.
+
+    Attributes:
+        folder (str): Root path to the dataset folder.
+        country (str): Country identifier extracted from the dataset name.
+        tile (str): Tile identifier extracted from the dataset name.
+        data_folder (str): Path to the folder containing .zarr data files.
+        meta_folder (str): Path to the folder containing metadata files.
+        transform (callable, optional): Optional transformation applied to each sample.
+        with_extra (bool): Whether to include extra geometric features in each sample.
+        classes (list): List of class names.
+        class_to_idx (dict): Mapping from class names to integer indices.
+        samples (list): List of tuples describing the dataset samples.
+        metadata (dict): Parsed metadata loaded from file.
+        dates (list): List of sensing dates.
+        date_positions (list): List of time differences (in days) from the start date.
+        date_indices (ndarray): Array of indices for time steps.
+    """
     def __init__(
         self,
         data_root,
@@ -140,6 +213,21 @@ class PixelSetData(Dataset):
         return sample
 
     def make_dataset(self, data_folder, meta_folder, class_to_idx, indices, country):
+        """
+        Constructs the list of dataset samples and loads metadata.
+
+        Parameters:
+            data_folder (str): Path to .zarr pixel data.
+            meta_folder (str): Path to metadata containing parcel information.
+            class_to_idx (dict): Mapping from class names to label indices.
+            indices (list or None): Optional list of parcel indices to include.
+            country (str): Country name used for class code mapping.
+
+        Returns:
+            tuple:
+                - list of tuples: Each tuple is (parcel_path, parcel_idx, label_index, extra_features)
+                - dict: Metadata dictionary with filtered parcels
+        """
         metadata = pkl.load(open(os.path.join(meta_folder, "metadata.pkl"), "rb"))
 
         instances = []
@@ -181,6 +269,16 @@ class PixelSetData(Dataset):
         return instances, metadata
 
     def days_after(self, start_date, dates):
+        """
+        Computes the number of days between each date and a given start date.
+
+        Parameters:
+            start_date (int or str): Start date in YYYYMMDD format.
+            dates (list): List of dates in YYYYMMDD format.
+
+        Returns:
+            list of int: Days since the start date for each input date.
+        """
         def parse(date):
             d = str(date)
             return int(d[:4]), int(d[4:6]), int(d[6:])
@@ -238,6 +336,25 @@ class PixelSetData(Dataset):
             print(f"  {code}: {code_name} (n={count}, avg pixels={avg_pixels:.1f})")
 
 class WrappedPixelSubset(Dataset):
+    """
+    A dataset wrapper that enables subset sampling and optional pixel sampling for training and validation phases.
+
+    Parameters:
+        base_dataset (Dataset): The original dataset containing full samples.
+        indices (list or ndarray): Indices of the samples to include in this subset.
+        sample_pixels (int, optional): Number of pixels to randomly sample per time step during training. 
+                                       If None, no sampling is applied.
+        is_validation (bool): If True, disables pixel sampling (used during validation).
+
+    Methods:
+        __len__(): Returns the number of samples in the subset.
+        __getitem__(idx): Retrieves and optionally samples a data sample at the given index.
+
+    Behavior:
+        - During training (`is_validation=False`), randomly samples `sample_pixels` from each sample.
+        - If the number of available pixels is less than `sample_pixels`, sampling is done with replacement.
+        - Adds a `valid_pixels` mask indicating the presence of sampled pixels.
+    """
     def __init__(self, base_dataset, indices, sample_pixels=None, is_validation=False):
         self.base_dataset = base_dataset
         self.indices = list(indices)
@@ -265,22 +382,19 @@ class WrappedPixelSubset(Dataset):
             sample["valid_pixels"] = np.ones((pixels.shape[0], pixels.shape[-1]), dtype=np.float32)
 
         return sample
-    
-class NormalizePerBand:
-    def __init__(self, mean, std):
-        # of shape (C, )
-        self.mean = mean
-        self.std = std
-
-    def __call__(self, sample):
-        # of shape (T, C, S)
-        pixels = sample["pixels"]
-        # broadcast to shape (1, C, 1)
-        mean = self.mean[None, :, None]
-        std = self.std[None, :, None]
-        sample["pixels"] = (pixels - mean) / std
 
 def compute_band_stats_from_dl(dataloader):
+    """
+    Computes per-band mean and standard deviation statistics from a dataloader.
+
+    Parameters:
+        dataloader (DataLoader): A PyTorch DataLoader yielding batches with "pixels" of shape (B, T, C, S).
+
+    Returns:
+        tuple:
+            - per_band_mean (Tensor): Mean per spectral channel.
+            - per_band_std (ndarray): Standard deviation per spectral channel.
+    """
     per_band_sum, per_band_sum_sq, count = 0, 0, 0
 
     for batch in dataloader:
@@ -296,9 +410,19 @@ def compute_band_stats_from_dl(dataloader):
     per_band_std = np.sqrt(per_band_sum_sq / count - per_band_mean ** 2)
     return per_band_mean, per_band_std
 
-
-
 def get_dataloaders_for_cv(dataset, n_splits=5, sample_pixels=32, batch_size=8):
+    """
+    Prepares cross-validation DataLoaders using the custom WrappedPixelSubset class.
+
+    Parameters:
+        dataset (Dataset): The full dataset to split.
+        n_splits (int): Number of cross-validation folds.
+        sample_pixels (int): Number of pixels to sample in training.
+        batch_size (int): Batch size for training DataLoader.
+
+    Returns:
+        list of tuples: Each tuple contains (train_loader, val_loader) for one fold.
+    """
     indices = np.arange(len(dataset))
     folds = np.array_split(indices, n_splits)
     dataloaders = []
@@ -318,6 +442,17 @@ def get_dataloaders_for_cv(dataset, n_splits=5, sample_pixels=32, batch_size=8):
     return dataloaders
 
 def normalize_batch(batch, mean, std):
+    """
+    Normalizes pixel data in a batch using provided mean and standard deviation.
+
+    Parameters:
+        batch (dict): A dictionary containing a "pixels" tensor of shape (T, C, S).
+        mean (Tensor): Per-channel mean tensor of shape (C,).
+        std (Tensor): Per-channel standard deviation tensor of shape (C,).
+
+    Returns:
+        dict: The normalized batch.
+    """
     pixels = batch["pixels"].float()
     # broadcast to (1, C, 1)
     mean = mean[None, :, None]
@@ -327,6 +462,18 @@ def normalize_batch(batch, mean, std):
     return batch
 
 def plot_metrics_shaded(per_phase_metric, y_label, title, save_path):
+    """
+    Plots metrics over epochs with shaded ±1 standard deviation.
+
+    Parameters:
+        per_phase_metric (list of list): Metric values across folds and epochs.
+        y_label (str): Label for the Y-axis.
+        title (str): Title of the plot.
+        save_path (str): Base path to save the plot (PNG and SVG formats).
+
+    Returns:
+        None
+    """
     # of shape (num_folds, num_epochs)
     metrics_array = np.array(per_phase_metric)  
     mean_metric = np.mean(metrics_array, axis=0)
@@ -347,6 +494,20 @@ def plot_metrics_shaded(per_phase_metric, y_label, title, save_path):
     plt.show()
 
 def train_one_epoch(model, optimizer, train_dl, per_channel_means, per_channel_stds, device):
+    """
+    Trains the model for a single epoch on the training set.
+
+    Parameters:
+        model (nn.Module): The PyTorch model to train.
+        optimizer (Optimizer): Optimizer for model parameters.
+        train_dl (DataLoader): Training dataloader.
+        per_channel_means (Tensor): Per-channel means for normalization.
+        per_channel_stds (Tensor): Per-channel standard deviations for normalization.
+        device (torch.device): Device to train on.
+
+    Returns:
+        float: Average training loss over the epoch.
+    """
     criterion = CrossEntropyLoss()
     curr_loss = 0.
     model.to(device)
@@ -368,6 +529,22 @@ def train_one_epoch(model, optimizer, train_dl, per_channel_means, per_channel_s
     return curr_loss / len(train_dl)
 
 def validate(model, val_dl, per_channel_means, per_channel_stds, device):
+    """
+    Evaluates the model on a validation set.
+
+    Parameters:
+        model (nn.Module): The trained model to evaluate.
+        val_dl (DataLoader): Validation dataloader.
+        per_channel_means (Tensor): Per-channel means for normalization.
+        per_channel_stds (Tensor): Per-channel standard deviations for normalization.
+        device (torch.device): Device to run evaluation on.
+
+    Returns:
+        tuple:
+            - float: Average validation loss.
+            - ndarray: Ground truth labels.
+            - ndarray: Predicted labels.
+    """
     criterion = CrossEntropyLoss()
     curr_loss, all_preds, all_labels = 0., [], []
     model.to(device)
@@ -392,6 +569,25 @@ def validate(model, val_dl, per_channel_means, per_channel_stds, device):
     return curr_loss / len(val_dl), all_labels, all_preds
 
 def calculate_val_metrics(all_preds, all_labels, conf_matrix=False):
+    """
+    Computes classification metrics on predictions vs ground truth.
+
+    Parameters:
+        all_preds (ndarray): Predicted class labels.
+        all_labels (ndarray): True class labels.
+        conf_matrix (bool): Whether to include the confusion matrix.
+
+    Returns:
+        tuple:
+            - accuracy (float)
+            - macro_precision (float)
+            - macro_recall (float)
+            - macro_f1 (float)
+            - weighted_precision (float)
+            - weighted_recall (float)
+            - weighted_f1 (float)
+            - confusion_matrix (ndarray, optional): If conf_matrix=True
+    """
     accuracy = accuracy_score(all_labels, all_preds)
     macro_pres = precision_score(all_labels, all_preds, average='macro', zero_division=0)
     macro_rec = recall_score(all_labels, all_preds, average='macro', zero_division=0)
@@ -407,9 +603,18 @@ def calculate_val_metrics(all_preds, all_labels, conf_matrix=False):
 
 
 def plot_metrics_and_heatmaps(metrics_dict, heatmaps, heatmap_titles=None, title='Metrics & Confusion Matrices'):
-    import matplotlib.pyplot as plt
-    import seaborn as sns
+    """
+    Plots per-fold metric bar charts and confusion matrix heatmaps.
 
+    Parameters:
+        metrics_dict (dict): Dictionary of {metric_name: list of fold values}.
+        heatmaps (list of ndarray): List of confusion matrices.
+        heatmap_titles (list of str, optional): Titles for each heatmap.
+        title (str): Overall figure title.
+
+    Returns:
+        None
+    """
     num_metrics = len(metrics_dict)
     num_heatmaps = len(heatmaps)
     total_plots = num_metrics + num_heatmaps
